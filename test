@@ -1,0 +1,83 @@
+#!/bin/bash -eu
+# Runs the basic tests in ctsha_tests.cpp. If those pass this script will download the FIPS 180-4 test vectors for
+# byte-oriented messages (see https://csrc.nist.gov/Projects/Cryptographic-Algorithm-Validation-Program/Secure-Hashing),
+# then generate static_assert test files from those test vectors, and compile them to make sure the algorithms work
+# correctly. All downloaded and generated files are put in a directory called "fips".
+
+# Generates static_assert test cases from a fips test vector file for a particular SHA algorithm.
+function generate_tests {
+  local FILE="${1}"
+  local ALGORITHM="${2}"
+  local TARGET="${3}"
+  local TESTS=$(paste -d' ' <(cat "${FILE}" | grep "Msg = " | cut -f3 -d' ' | dos2unix) \
+                            <(cat "${FILE}" | grep "MD = "  | cut -f3 -d' ' | dos2unix) \
+                            <(cat "${FILE}" | grep "Len = " | cut -f3 -d' ' | dos2unix))
+
+  echo '#include "../ctsha.hpp"'           > ${TARGET}
+  echo '#include "../ctsha_tests.hpp"'    >> ${TARGET}
+  echo 'using namespace ctsha::literals;' >> ${TARGET}
+
+  while read -r line; do
+    local MESSAGE=$(echo $line | cut -f1 -d' ')
+    local DIGEST=$(echo $line | cut -f2 -d' ')
+    local LEN=$(echo $line | cut -f3 -d' ')
+    if [[ ${LEN} -eq 0 ]]; then
+      # The zero-length message is a special case.
+      echo "static_assert(${ALGORITHM}(std::array<std::byte, 0>{}) == \"${DIGEST}\"_hex_bytes);" >> ${TARGET}
+    else
+      echo "static_assert(${ALGORITHM}(\"${MESSAGE}\"_hex_bytes) == \"${DIGEST}\"_hex_bytes);" >> ${TARGET}
+    fi
+  done <<< "${TESTS}"
+}
+
+function run_test {
+  g++-10 -std=c++2a -Wall -Werror -Wextra -c "${1}" -o /dev/null
+}
+
+echo "Running basic tests..."
+run_test ctsha_tests.cpp
+
+mkdir -p fips
+cd fips
+
+# Download the test vectors if we don't already have them.
+if [[ ! -d "shabytetestvectors" ]]; then
+  echo "Downloading test vectors..."
+  wget -q https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/shabytetestvectors.zip
+  unzip shabytetestvectors.zip > /dev/null
+  rm shabytetestvectors.zip
+fi
+
+TESTS=(
+  "SHA1ShortMsg       ctsha::sha1"
+  "SHA1LongMsg        ctsha::sha1" 
+  "SHA224ShortMsg     ctsha::sha224"
+  "SHA224LongMsg      ctsha::sha224"
+  "SHA256ShortMsg     ctsha::sha256"
+  "SHA256LongMsg      ctsha::sha256"
+  "SHA384ShortMsg     ctsha::sha384"
+  "SHA384LongMsg      ctsha::sha384"
+  "SHA512ShortMsg     ctsha::sha512"
+  "SHA512LongMsg      ctsha::sha512"
+  "SHA512_224ShortMsg ctsha::sha512_t<224>"
+  "SHA512_224LongMsg  ctsha::sha512_t<224>"
+  "SHA512_256ShortMsg ctsha::sha512_t<256>"
+  "SHA512_256LongMsg  ctsha::sha512_t<256>"
+)
+
+# Generate test files.
+for TEST_CASE in "${TESTS[@]}"; do
+  TEST_FILE=$(echo ${TEST_CASE} | cut -f1 -d' ')
+  FUNCTION=$(echo ${TEST_CASE} | cut -f2 -d' ')
+  if [[ ! -e "${TEST_FILE}.cpp" ]]; then
+    echo "Generating ${TEST_FILE}.cpp..."
+    generate_tests "shabytetestvectors/${TEST_FILE}.rsp" "${FUNCTION}" "${TEST_FILE}.cpp"
+  fi
+done
+
+# Run tests.
+for TEST_CASE in "${TESTS[@]}"; do
+  TEST_FILE=$(echo ${TEST_CASE} | cut -f1 -d' ')
+  echo "Running ${TEST_FILE} tests..."
+  run_test "${TEST_FILE}.cpp"
+done
